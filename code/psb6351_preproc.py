@@ -4,11 +4,10 @@
 # class specific info qos = classroom
 
 # CHANGE YOUR SBATCH ACCORDING TO YOUR ACCESS
-#SBATCH --account acc_madlab
-#SBATCH --partition highmem1-sapphirerapids
-#SBATCH --qos highmem1
-#SBATCH -o /scratch/madlab/Mattfeld_PSB6351/ATM/crash/preproc_o
-#SBATCH -e /scratch/madlab/Mattfeld_PSB6351/ATM/crash/preproc_e
+#SBATCH --account acc_psb6351
+#SBATCH --qos classroom
+#SBATCH -o /home/aoste011/psb6351_work/crash/preproc_o
+#SBATCH -e /home/aoste011/psb6351_work/crash/preproc_e
 
 import os
 from glob import glob
@@ -30,10 +29,15 @@ import nipype.interfaces.utility as util
 sids = ['sub-021']
 
 # set working, base, and sink directories
-base_dir = '/home/amattfel/Mattfeld_PSB6351'
-work_dir = '/scratch/madlab/Mattfeld_PSB6351/ATM'
+base_dir = '/home/aoste011/Mattfeld_PSB6351'
+work_dir = '/home/aoste011/psb6351_work'
 sink_dir = os.path.join(base_dir, 'derivatives/preproc')
-fs_dir = '/home/amattfel/Mattfeld_PSB6351/derivatives/freesurfer'
+fs_dir = os.path.join(base_dir, 'derivatives/freesurfer')
+
+# FreeSurfer setup for bbregister and the FreeSurfer nodes below
+os.environ['FREESURFER_HOME'] = '/home/applications/freesurfer/7.1/freesurfer'
+os.environ['PATH'] += ':/home/applications/freesurfer/7.1/freesurfer/bin/'
+os.environ['SUBJECTS_DIR'] = fs_dir
 
 # Function for extracting slice timing info from fMRI json sidecars
 def slc_time(json_file_list):
@@ -80,7 +84,13 @@ def pickfirst(func):
 
 # Function for picking the best volume derived from a 
 # list of outlier counts
+# NOTE (my change, kept from earlier weeks): the outlier node passes in a text
+#       FILE, not a list, so the function loads the file into a list first.
+#       numpy is also imported inside the function because nipype Function
+#       nodes run in their own environment and can't see the imports above.
 def best_vol(outlier_count, middlebest):
+    import numpy as np
+    outlier_count = np.loadtxt(outlier_count).tolist()
     if middlebest == True:
         best_vol_num = int(np.ceil(len(outlier_count)/2)) #PICKING MIDDLE
     else:
@@ -190,6 +200,12 @@ psb6351_wf.connect(extractref, 'roi_file', fs_register, 'source_file')
 #           per node using similar syntax to below:
 # smooth_median.plugin_args={'sbatch_args': ('--partition highmem1-sapphirerapids --cpus-per-task=3 --account acc_madlab --qos highmem1'), 'overwrite': True}
 #           modify your code accordingly to excute without error
+#
+# MY CHANGE: I use the class account (acc_psb6351 / classroom), not acc_madlab.
+#            The memory-heavy nodes below (SUSAN smoothing and temporal
+#            filtering) get their own plugin_args asking for more memory.
+heavy_args = {'sbatch_args': ('--account acc_psb6351 --qos classroom --mem=24G'),
+              'overwrite': True}
 
 # NODE 11: SPATIAL SMOOTHING
 # You have a couple of options here...
@@ -200,11 +216,17 @@ psb6351_wf.connect(extractref, 'roi_file', fs_register, 'source_file')
 # https://nipype.readthedocs.io/en/latest/api/generated/nipype.interfaces.fsl.utils.html#nipype.interfaces.fsl.utils.Smooth
 # QUESTIONS TO ANSWER...
 # Q1 - What does isotropic mean?
+# MY ANSWER:
+#
 # Q2 - What are the pros and cons of isotropic spatial smoothing?
+# MY ANSWER:
+#
 # AFNI has some cool tools to help control the final smoothness of your data
 # Specifically 3dBlurToFWHM, this function will estimate your intrinsic smoothness and iteratively
 # spatially blur up until it achieves a targeted smoothness
 # Q3 - Why might this be good?  Are there any potential cons?
+# MY ANSWER:
+#
 # If you intend to use AFNI's 3dBlurToFWHM check out hte following page:
 # https://nipype.readthedocs.io/en/latest/api/generated/nipype.interfaces.afni.preprocess.html#nipype.interfaces.afni.preprocess.BlurToFWHM
 # NOTE: If you elect to use this one be careful on how big you make your
@@ -214,6 +236,7 @@ psb6351_wf.connect(extractref, 'roi_file', fs_register, 'source_file')
 # to constrain smoothing to like intensities (smooth only grey matter with grey matter)
 # Q4 - Why might his be good? Cons (hint: begins with an 'e' and ends with 'ge' effects)?
 #      How might the cons influence Gaussian Random Field Theory?
+# MY ANSWER:
 #
 # If you choose an isotropic approach or AFNI's 3dBlurToFWHM you need
 # to add just a single node here.
@@ -234,6 +257,8 @@ psb6351_wf.connect(extractref, 'roi_file', fs_register, 'source_file')
 #          You have to pass the registration matrix file derived from your coregistration node
 #          You also have to choose an interpolation...
 # Q5 - why is nearest neighbor interpolation correct here? What is nearest neighbor interpolation?
+# MY ANSWER:
+#
 # NODE 4 - Now use the mask that is in EPI space to mask the EPI image by voxels that only cover the brain
 #          you can use FSL's fslmaths and the '-mas' flag to work here
 # NODE 5 - Get the median of your EPI data using FSL's fslmath with the following op_string = '-k %s -p 50'
@@ -247,15 +272,96 @@ psb6351_wf.connect(extractref, 'roi_file', fs_register, 'source_file')
 
 
 # NODES FOR SPATIAL SMOOTHING GO HERE!!!!
+# MY ANSWER (tool choice): I used FSL's SUSAN approach.
+
+# SUSAN NODE 1: FreeSurferSource - grabs this subject's recon_all outputs
+fssource = pe.Node(nio.FreeSurferSource(),
+                   name='fssource')
+fssource.inputs.subjects_dir = fs_dir
+psb6351_wf.connect(subjID_infosource, 'subject_id', fssource, 'subject_id')
+
+# SUSAN NODE 2: Binarize aparc+aseg (values > 0.5 = brain), dilate by 1 voxel
+binarize = pe.Node(fs.Binarize(min=0.5,
+                               dilate=1,
+                               out_type='nii.gz'),
+                   name='binarize')
+psb6351_wf.connect(fssource, ('aparc_aseg', get_aparc_aseg), binarize, 'in_file')
+
+# SUSAN NODE 3: Move the T1w-space mask into EPI space with the bbregister matrix
+#   source_file = where we're going (the EPI reference volume)
+#   target_file = what is moving (the binarized T1w-space mask)
+#   inverse=True applies the transform from T1w space back into EPI space
+masktransform = pe.Node(fs.ApplyVolTransform(inverse=True,
+                                             interp='nearest'),
+                        name='masktransform')
+masktransform.inputs.subjects_dir = fs_dir
+psb6351_wf.connect(fs_register, 'out_reg_file', masktransform, 'reg_file')
+psb6351_wf.connect(binarize, 'binary_file', masktransform, 'target_file')
+psb6351_wf.connect(extractref, 'roi_file', masktransform, 'source_file')
+
+# SUSAN NODE 4: Mask each slice-time-corrected run with the EPI-space brain mask
+maskfunc = pe.MapNode(fsl.ImageMaths(op_string='-mas',
+                                     suffix='_brain'),
+                      iterfield=['in_file'],
+                      name='maskfunc')
+psb6351_wf.connect(tshifter, 'out_file', maskfunc, 'in_file')
+psb6351_wf.connect(masktransform, 'transformed_file', maskfunc, 'in_file2')
+
+# SUSAN NODE 5: Median intensity inside the brain mask for each run
+medianval = pe.MapNode(fsl.ImageStats(op_string='-k %s -p 50'),
+                       iterfield=['in_file'],
+                       name='medianval')
+psb6351_wf.connect(tshifter, 'out_file', medianval, 'in_file')
+psb6351_wf.connect(masktransform, 'transformed_file', medianval, 'mask_file')
+
+# SUSAN NODE 6: Mean functional image (over time) for each masked run
+meanfunc = pe.MapNode(fsl.ImageMaths(op_string='-Tmean',
+                                     suffix='_mean'),
+                      iterfield=['in_file'],
+                      name='meanfunc')
+psb6351_wf.connect(maskfunc, 'out_file', meanfunc, 'in_file')
+
+# SUSAN NODE 7: Pair each run's mean image with its median value (hstack)
+mergenode = pe.Node(util.Merge(2, axis='hstack'),
+                    name='mergenode')
+psb6351_wf.connect(meanfunc, 'out_file', mergenode, 'in1')
+psb6351_wf.connect(medianval, 'out_stat', mergenode, 'in2')
+
+# SUSAN NODE 8: SUSAN smoothing at 3, 6, 9, and 12mm FWHM
+# NOTE: A MapNode zips its iterfield lists together one-to-one, so it can't
+#       cross 4 kernels with every run by itself. Instead, the kernel list is
+#       an iterable (nipype re-runs SUSAN once per kernel), and the MapNode
+#       iterates over the runs.
+# MY ANSWER (what else goes in the iterfield): besides in_file, the
+#       brightness_threshold and usans, because each run has its own median
+#       and its own mean image.
+fwhm_source = pe.Node(IdentityInterface(fields=['fwhm']),
+                      name='fwhm_source')
+fwhm_source.iterables = ('fwhm', [3.0, 6.0, 9.0, 12.0])
+
+smooth = pe.MapNode(fsl.SUSAN(),
+                    iterfield=['in_file', 'brightness_threshold', 'usans'],
+                    name='smooth')
+smooth.plugin_args = heavy_args
+psb6351_wf.connect(fwhm_source, 'fwhm', smooth, 'fwhm')
+psb6351_wf.connect(maskfunc, 'out_file', smooth, 'in_file')
+psb6351_wf.connect(medianval, ('out_stat', getbtthresh), smooth, 'brightness_threshold')
+psb6351_wf.connect(mergenode, ('out', getusans), smooth, 'usans')
 
 
 # NODE 12: TEMPORAL FILTERING OR SMOOTHING
 # I want you to add a node here to temporally filter the functional data --> should this be a mapnode or regular node?
+# MY ANSWER: A MapNode, because there are multiple functional runs and each
+#            run has to be filtered separately.
 # If the functional EPI data are resting state data I want you to implement a 
 # bandpass filter. If the functional EPI data are task data I want you to implement
 # a highpass filter.
 # Q6 - why bandpass resting state but only highpass task EPI data?
+# MY ANSWER:
+#
 # I want you to utilize either the FSL tools implementing fslmaths, what op_string flag would you need?
+# MY ANSWER: -bptf <highpass sigma> <lowpass sigma>, with -1 for the lowpass
+#            sigma so only the highpass filter is applied.
 # https://nipype.readthedocs.io/en/latest/api/generated/nipype.interfaces.fsl.utils.html#nipype.interfaces.fsl.utils.ImageMaths
 # Or you can use AFNI's 3dBandpass function
 # https://nipype.readthedocs.io/en/latest/api/generated/nipype.interfaces.afni.preprocess.html#nipype.interfaces.afni.preprocess.Bandpass
@@ -272,6 +378,26 @@ psb6351_wf.connect(extractref, 'roi_file', fs_register, 'source_file')
 # If you're feeling ambitious you can implement multiple approaches and compare/contrast them
 
 # NODES FOR TEMPORAL FILTERING GO HERE !!!!!
+# These are task runs (task-study, task-loc), so I used a highpass filter
+# with FSL's fslmaths -bptf.
+# fslmaths wants the cutoff as a sigma in VOLUMES, not seconds:
+#   sigma = cutoff / (2 * TR) = 128 s / (2 * 1.76 s) = 36.36 volumes
+# -bptf also removes each voxel's mean, so the mean image is added back
+# afterward (-add) to keep the data at its original intensity.
+# I filtered the masked, unsmoothed runs so the effect of the filter can be
+# seen on its own, separate from smoothing (this also saves disk space).
+hpf_cutoff = 128.0
+tr = 1.76
+hpf_sigma = hpf_cutoff / (2.0 * tr)
+
+highpass = pe.MapNode(fsl.ImageMaths(op_string='-bptf %.2f -1 -add' % hpf_sigma,
+                                     suffix='_hpf'),
+                      iterfield=['in_file', 'in_file2'],
+                      name='highpass')
+highpass.plugin_args = heavy_args
+psb6351_wf.connect(maskfunc, 'out_file', highpass, 'in_file')
+psb6351_wf.connect(meanfunc, 'out_file', highpass, 'in_file2')
+
 
 # NODE FINAL: DataSink. Modify to save only the files you want at the completion of your workflow
 datasink = pe.Node(nio.DataSink(), name="datasink")
@@ -287,11 +413,23 @@ psb6351_wf.connect(fs_register, 'out_fsl_file', datasink, 'register.@reg_fsl_fil
 
 # ADD datasink connections to save spatially smoothed and temporally filtered data
 # if you implemented more than one method for diadatic purposes...save accordingly
+psb6351_wf.connect(masktransform, 'transformed_file', datasink, 'mask.@epi_mask')
+psb6351_wf.connect(maskfunc, 'out_file', datasink, 'masked.@unsmoothed')
+psb6351_wf.connect(smooth, 'smoothed_file', datasink, 'smooth.@smoothed')
+psb6351_wf.connect(highpass, 'out_file', datasink, 'hpf.@filtered')
 
 psb6351_wf.connect(getsubs, 'subs', datasink, 'substitutions')
 
 psb6351_wf.config['execution']['use_relative_paths'] = True
-psb6351_wf.config['execution']['crashdump_dir'] = '/scratch/madlab/Mattfeld_PSB6351/ATM/crash'
+psb6351_wf.config['execution']['crashdump_dir'] = '/home/aoste011/psb6351_work/crash'
+# Each nipype job loads AFNI/FSL on the compute node itself so the cluster
+# picks the builds that match that node (fixes the libpng16 error on Broadwell nodes)
+slurm_template = ('#!/bin/bash\n'
+                  'source /etc/profile\n'
+                  'module purge\n'
+                  'module load afni/25.2.07-none-none fsl/6.0.6-none-none\n')
 psb6351_wf.run(plugin='SLURM',
-               plugin_args={'sbatch_args': ('--partition highmem1-sapphirerapids --account acc_madlab --qos highmem1'),
+               plugin_args={'sbatch_args': ('--account acc_psb6351 --qos classroom --mem=16G'),
+                            'template': slurm_template,
                             'overwrite':True})
+
