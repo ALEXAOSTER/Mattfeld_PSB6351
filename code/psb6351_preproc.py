@@ -216,16 +216,29 @@ heavy_args = {'sbatch_args': ('--account acc_psb6351 --qos classroom --mem=24G')
 # https://nipype.readthedocs.io/en/latest/api/generated/nipype.interfaces.fsl.utils.html#nipype.interfaces.fsl.utils.Smooth
 # QUESTIONS TO ANSWER...
 # Q1 - What does isotropic mean?
-# MY ANSWER:
+# MY ANSWER: Isotropic means being the same, regardless of which direction it is measured.
+# The Gaussian kernel has the same FWHM in the x, y, and z directions. It is applied the
+# same way everywhere in the brain, no matter what tissue type it is.
 #
 # Q2 - What are the pros and cons of isotropic spatial smoothing?
-# MY ANSWER:
+# MY ANSWER: There are many pros and cons of isotropic spatial smoothing. Some of the pros include
+# that it raises SNR, because random noise averages out while real signal is spatially correlated.
+# Another advantage is that it helps the overlapping of activations across subjects in group analyses.
+# This helps the data fit the Gaussian Random Field assumptions, which is used for multiple comparison
+# correction. It is also simple and fast. Some of the cons include it blurring tissue boundaries so signals mix. 
+# This is bad as one loses spatial specificity, so that small activations tend to get washed out, separate
+# regions will sometimes merge, and the peak locations can shift as well.
 #
 # AFNI has some cool tools to help control the final smoothness of your data
 # Specifically 3dBlurToFWHM, this function will estimate your intrinsic smoothness and iteratively
 # spatially blur up until it achieves a targeted smoothness
 # Q3 - Why might this be good?  Are there any potential cons?
-# MY ANSWER:
+# MY ANSWER: 3dBlurToFWHM may be good to use as different sets of data start with different intrinsic smoothness 
+# Blurring to a specific target means that every dataset will end at the same final smoothness. This can be very 
+# beneficial when wanting to compare results across subjects and sites. The smoothness-based stats would then be 
+# consistent. Some cons include it being slow, especially with the big targets. It can only add smoothness, so if 
+# that data are already smoother than the target, it can not fix that. It would still blur across tissue boundaries 
+# like regular smoothing does.
 #
 # If you intend to use AFNI's 3dBlurToFWHM check out hte following page:
 # https://nipype.readthedocs.io/en/latest/api/generated/nipype.interfaces.afni.preprocess.html#nipype.interfaces.afni.preprocess.BlurToFWHM
@@ -234,9 +247,16 @@ heavy_args = {'sbatch_args': ('--account acc_psb6351 --qos classroom --mem=24G')
 # FSL has some cool tools that help ensure that you spatially smooth like voxels
 # This is FSL's SUSAN algorithm, this function will use intensities in voxels
 # to constrain smoothing to like intensities (smooth only grey matter with grey matter)
-# Q4 - Why might his be good? Cons (hint: begins with an 'e' and ends with 'ge' effects)?
+# Q4 - Why might this be good? Cons (hint: begins with an 'e' and ends with 'ge' effects)?
 #      How might the cons influence Gaussian Random Field Theory?
-# MY ANSWER:
+# MY ANSWER: SUSAN is good in the way that it is edge-preserving. It only averages a voxel with neighboring voxels 
+# with similar brightness, so that gray matter gets smoothed with other gray matter and is not mixed with CSF or 
+# white matter. Basically, with this tool, you get noise reduction while keeping spatial detail. Cons of this 
+# include edge effects, that it smooths near tissue boundaries less than in the middle of the tissue. The amount 
+# of smoothing varies across the brain, instead of it being uniform. This is an issue in terms of the Gaussian Random 
+# Field Theory as it assumes that smoothness is the same everywhere in the image. With SUSAN this is simply not true, 
+# so the multiple comparison corrections based on it can be inaccurate. 
+
 #
 # If you choose an isotropic approach or AFNI's 3dBlurToFWHM you need
 # to add just a single node here.
@@ -257,7 +277,11 @@ heavy_args = {'sbatch_args': ('--account acc_psb6351 --qos classroom --mem=24G')
 #          You have to pass the registration matrix file derived from your coregistration node
 #          You also have to choose an interpolation...
 # Q5 - why is nearest neighbor interpolation correct here? What is nearest neighbor interpolation?
-# MY ANSWER:
+# MY ANSWER: The nearest neighbor interpolation is when an image is moved into a new space. During this, each new voxel 
+# takes the value of the closest original voxel, and does not average between voxels. The reason the nearest neighbor 
+# interpolation may be best here is because the mask is binary, only using 0s and 1s. Other methods would average
+# neighbors and create in between values, such as 0.4 along the edges, so it would not be binary anymore. Nearest neighbors 
+# keep it at 0 or 1. 
 #
 # NODE 4 - Now use the mask that is in EPI space to mask the EPI image by voxels that only cover the brain
 #          you can use FSL's fslmaths and the '-mas' flag to work here
@@ -357,7 +381,11 @@ psb6351_wf.connect(mergenode, ('out', getusans), smooth, 'usans')
 # bandpass filter. If the functional EPI data are task data I want you to implement
 # a highpass filter.
 # Q6 - why bandpass resting state but only highpass task EPI data?
-# MY ANSWER:
+# MY ANSWER: Bandpass resting state but only highpass task EPI data because with resting state there is no task, and the signal 
+# that we are looking at is typically slow spontaneous fluctuations. A bandpass removes slow drift below that range and faster noise
+# above it, such as breathing and heartbeat. When it comes to task data, the task related signal can contain faster frequencies, 
+# especially in event related designs, so a low pass filter can remove real task signal. This is why it is important to only remove
+# the slow drift with a high pass filter whose cutoff is slower than the task's timing. 
 #
 # I want you to utilize either the FSL tools implementing fslmaths, what op_string flag would you need?
 # MY ANSWER: -bptf <highpass sigma> <lowpass sigma>, with -1 for the lowpass
